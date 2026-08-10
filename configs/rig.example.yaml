@@ -38,6 +38,10 @@ recording:
   camera_fps: 30
   fps: 30
   robot: piper
+  # Requires the HandUMI XRoboToolkit APK and PICO enterprise VST permission.
+  # Enable from CLI with --pico-av and pass the SN shown by XRoboToolkit with
+  # --pico-device-id.  Kept false here so ordinary USB-camera recording is unchanged.
+  pico_av: false
 
 feetech:
   baudrate: 1000000

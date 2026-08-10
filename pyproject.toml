@@ -30,6 +30,8 @@ dependencies = [
     # Offline voice control for hands-free recording (src/handumi/utils/voice.py).
     "vosk>=0.3.45",
     "sounddevice>=0.4.6",
+    # Offline multilingual transcription for synchronized PICO microphone data.
+    "faster-whisper>=1.1,<2",
 ]
 
 [project.urls]

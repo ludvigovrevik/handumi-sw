@@ -77,6 +77,11 @@ from handumi.feetech import (
     zero_gripper_widths,
 )
 from handumi.feetech.bus import FeetechUnavailableError
+from handumi.media.pico_av import (
+    PicoAvCapture,
+    PicoAvController,
+    augment_lerobot_dataset_with_pico_av,
+)
 from handumi.robots.utils import IDENTITY_POSE7
 from handumi.synchronization import (
     SustainedHealthGate,
@@ -147,6 +152,7 @@ _RECORDING_DEFAULTS: dict[str, object] = {
     "skip_feetech": False,
     "no_video": False,
     "robot": "piper",
+    "pico_av": False,
 }
 
 
@@ -229,7 +235,9 @@ class _StrictStreamingEncoder:
         try:
             results = self._encoder.finish_episode()
         except Exception as exc:
-            raise StreamingEncodingError(f"encoder failed while finishing: {exc}") from exc
+            raise StreamingEncodingError(
+                f"encoder failed while finishing: {exc}"
+            ) from exc
 
         try:
             for key in self._video_keys:
@@ -238,9 +246,13 @@ class _StrictStreamingEncoder:
                 path, stats = results[key]
                 path = Path(path)
                 if not path.is_file() or path.stat().st_size <= 0:
-                    raise StreamingEncodingError(f"encoder produced an empty video for {key}")
+                    raise StreamingEncodingError(
+                        f"encoder produced an empty video for {key}"
+                    )
                 if expected_frames >= 2 and stats is None:
-                    raise StreamingEncodingError(f"encoder returned no statistics for {key}")
+                    raise StreamingEncodingError(
+                        f"encoder returned no statistics for {key}"
+                    )
             self._prepared_results = results
         except Exception:
             self._remove_results(results)
@@ -417,7 +429,9 @@ def _select_video_encoder(
         threads = (
             requested_threads
             if requested_threads is not None
-            else None if hardware else _recommended_encoder_threads(camera_count)
+            else None
+            if hardware
+            else _recommended_encoder_threads(camera_count)
         )
         ok, error = _probe_video_encoder(
             candidate,
@@ -434,7 +448,9 @@ def _select_video_encoder(
             )
         failures.append(f"{candidate}: {error or 'unknown error'}")
         if hardware:
-            log.warning("Hardware encoder %s failed its startup probe: %s", candidate, error)
+            log.warning(
+                "Hardware encoder %s failed its startup probe: %s", candidate, error
+            )
 
     requested = requested_vcodec if explicit_codec else policy
     details = "; ".join(failures)
@@ -515,9 +531,7 @@ def build_features(
 ) -> dict:
     img_dtype = "video" if use_videos else "image"
     features: dict = {}
-    specs_by_name = {
-        str(spec["name"]): spec for spec in (camera_specs or [])
-    }
+    specs_by_name = {str(spec["name"]): spec for spec in (camera_specs or [])}
     for cam in cam_names:
         width, height = camera_output_size(
             specs_by_name.get(cam, {}),
@@ -557,11 +571,21 @@ def build_observation(sample: ControllerPairSample, widths: GripperWidths) -> di
         "observation.state": state,
         "action": state.copy(),
         "observation.feetech.left_ticks": np.array([widths.left_ticks], dtype=np.int64),
-        "observation.feetech.right_ticks": np.array([widths.right_ticks], dtype=np.int64),
-        "observation.feetech.left_width_mm": np.array([widths.left_mm], dtype=np.float32),
-        "observation.feetech.right_width_mm": np.array([widths.right_mm], dtype=np.float32),
-        "observation.feetech.left_normalized": np.array([widths.left_normalized], dtype=np.float32),
-        "observation.feetech.right_normalized": np.array([widths.right_normalized], dtype=np.float32),
+        "observation.feetech.right_ticks": np.array(
+            [widths.right_ticks], dtype=np.int64
+        ),
+        "observation.feetech.left_width_mm": np.array(
+            [widths.left_mm], dtype=np.float32
+        ),
+        "observation.feetech.right_width_mm": np.array(
+            [widths.right_mm], dtype=np.float32
+        ),
+        "observation.feetech.left_normalized": np.array(
+            [widths.left_normalized], dtype=np.float32
+        ),
+        "observation.feetech.right_normalized": np.array(
+            [widths.right_normalized], dtype=np.float32
+        ),
         **sample.tracking_frame(),
     }
 
@@ -625,66 +649,100 @@ class _RecordingRerun:
             ("observation.feetech.left_width_mm", "left_width_mm", LEFT_COLOR),
             ("observation.feetech.right_width_mm", "right_width_mm", RIGHT_COLOR),
         ):
-            rr.log(path, rr.SeriesLines(colors=[[*color, 255]], widths=[2.5], names=[name]), static=True)
+            rr.log(
+                path,
+                rr.SeriesLines(colors=[[*color, 255]], widths=[2.5], names=[name]),
+                static=True,
+            )
 
-        corners = [[sx * 0.75, sy * 0.75, sz * 0.4]
-                   for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
-        rr.log("tracking/bounds", rr.Points3D(corners, colors=[[128, 100, 100, 90]] * 8, radii=0.004), static=True)
-        recent = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(
-            timeline="log_time",
-            range=rdt.TimeRange(
-                start=rdt.TimeRangeBoundary.cursor_relative(seconds=-_RERUN_CHART_WINDOW_S),
-                end=rdt.TimeRangeBoundary.cursor_relative(seconds=0.0),
-            ),
-        ))
+        corners = [
+            [sx * 0.75, sy * 0.75, sz * 0.4]
+            for sx in (-1, 1)
+            for sy in (-1, 1)
+            for sz in (-1, 1)
+        ]
+        rr.log(
+            "tracking/bounds",
+            rr.Points3D(corners, colors=[[128, 100, 100, 90]] * 8, radii=0.004),
+            static=True,
+        )
+        recent = rrb.VisibleTimeRanges(
+            rrb.VisibleTimeRange(
+                timeline="log_time",
+                range=rdt.TimeRange(
+                    start=rdt.TimeRangeBoundary.cursor_relative(
+                        seconds=-_RERUN_CHART_WINDOW_S
+                    ),
+                    end=rdt.TimeRangeBoundary.cursor_relative(seconds=0.0),
+                ),
+            )
+        )
         chart = rrb.TimeSeriesView(
             origin="/",
-            contents=["/observation.feetech.left_width_mm", "/observation.feetech.right_width_mm"],
+            contents=[
+                "/observation.feetech.left_width_mm",
+                "/observation.feetech.right_width_mm",
+            ],
             name="gripper_width_mm",
             axis_y=rrb.ScalarAxis(range=(0.0, 90.0)),
             time_ranges=recent,
             plot_legend=rrb.Corner2D.LeftTop,
         )
-        right = chart if not cam_names else rrb.Vertical(
-            rrb.Horizontal(*[
-                rrb.Spatial2DView(origin=f"/observation.images.{name}", name=name)
-                for name in cam_names
-            ]),
-            chart,
-            row_shares=[3, 2],
+        right = (
+            chart
+            if not cam_names
+            else rrb.Vertical(
+                rrb.Horizontal(
+                    *[
+                        rrb.Spatial2DView(
+                            origin=f"/observation.images.{name}", name=name
+                        )
+                        for name in cam_names
+                    ]
+                ),
+                chart,
+                row_shares=[3, 2],
+            )
         )
         status = rrb.TextDocumentView(
             origin="/recording",
             contents=["/recording/status"],
             name="recording_status",
         )
-        rr.send_blueprint(rrb.Blueprint(
-            rrb.Vertical(
-                rrb.Horizontal(
-                    rrb.Spatial3DView(origin="/tracking", name="controller_trajectory",
-                                       background=rrb.Background(color=[*BACKGROUND_COLOR, 255])),
-                    right,
-                    column_shares=[2, 3],
+        rr.send_blueprint(
+            rrb.Blueprint(
+                rrb.Vertical(
+                    rrb.Horizontal(
+                        rrb.Spatial3DView(
+                            origin="/tracking",
+                            name="controller_trajectory",
+                            background=rrb.Background(color=[*BACKGROUND_COLOR, 255]),
+                        ),
+                        right,
+                        column_shares=[2, 3],
+                    ),
+                    status,
+                    row_shares=[10, 1],
                 ),
-                status,
-                row_shares=[10, 1],
+                rrb.BlueprintPanel(state="collapsed"),
+                rrb.SelectionPanel(state="collapsed"),
+                rrb.TimePanel(state="collapsed"),
             ),
-            rrb.BlueprintPanel(state="collapsed"),
-            rrb.SelectionPanel(state="collapsed"),
-            rrb.TimePanel(state="collapsed"),
-        ), make_active=True, make_default=True)
+            make_active=True,
+            make_default=True,
+        )
         self.set_status("READY", "Waiting to start the first episode")
 
     def set_status(self, state: str, detail: str) -> None:
         """Show the current recorder state as a persistent operator flag."""
         self.rr.log(
             "recording/status",
-            self.rr.TextDocument(
-                f"# {state}\n\n{detail}", media_type="text/markdown"
-            ),
+            self.rr.TextDocument(f"# {state}\n\n{detail}", media_type="text/markdown"),
         )
 
-    def log(self, cam_frames: dict, sample: ControllerPairSample, widths: GripperWidths) -> None:
+    def log(
+        self, cam_frames: dict, sample: ControllerPairSample, widths: GripperWidths
+    ) -> None:
         """Log a frame without allowing a viewer problem to stop recording."""
         if not self._healthy:
             return
@@ -695,29 +753,59 @@ class _RecordingRerun:
             for key, frame in cam_frames.items():
                 if key.startswith("observation.images."):
                     rr.log(key, rr.Image(frame).compress(jpeg_quality=75))
-            rr.log("observation.feetech.left_width_mm", rr.Scalars(float(widths.left_mm)))
-            rr.log("observation.feetech.right_width_mm", rr.Scalars(float(widths.right_mm)))
+            rr.log(
+                "observation.feetech.left_width_mm", rr.Scalars(float(widths.left_mm))
+            )
+            rr.log(
+                "observation.feetech.right_width_mm", rr.Scalars(float(widths.right_mm))
+            )
             for side, tcp, raw, color, tracked in (
-                ("left", sample.left_tcp_pose, sample.left_controller_pose, LEFT_COLOR, sample.left_tracked),
-                ("right", sample.right_tcp_pose, sample.right_controller_pose, RIGHT_COLOR, sample.right_tracked),
+                (
+                    "left",
+                    sample.left_tcp_pose,
+                    sample.left_controller_pose,
+                    LEFT_COLOR,
+                    sample.left_tracked,
+                ),
+                (
+                    "right",
+                    sample.right_tcp_pose,
+                    sample.right_controller_pose,
+                    RIGHT_COLOR,
+                    sample.right_tracked,
+                ),
             ):
                 if not tracked:
                     continue
                 trail = self.trails[side]
                 trail.append(tcp[:3])
-                rr.log(f"tracking/{side}/tcp", rr.Points3D([tcp[:3]], colors=[color], radii=0.012))
+                rr.log(
+                    f"tracking/{side}/tcp",
+                    rr.Points3D([tcp[:3]], colors=[color], radii=0.012),
+                )
                 if len(points := trail.points()) >= 2:
-                    rr.log(f"tracking/{side}/trail", rr.LineStrips3D([points], colors=[color], radii=0.003))
+                    rr.log(
+                        f"tracking/{side}/trail",
+                        rr.LineStrips3D([points], colors=[color], radii=0.003),
+                    )
                 raw_trail = self.raw_trails[side]
                 raw_trail.append(raw[:3])
-                rr.log(f"tracking/{side}/raw", rr.Points3D([raw[:3]], colors=[[*color, 90]], radii=0.007))
+                rr.log(
+                    f"tracking/{side}/raw",
+                    rr.Points3D([raw[:3]], colors=[[*color, 90]], radii=0.007),
+                )
                 if len(raw_points := raw_trail.points()) >= 2:
-                    rr.log(f"tracking/{side}/raw_trail", rr.LineStrips3D(
-                        [raw_points], colors=[[*color, 90]], radii=0.0015
-                    ))
+                    rr.log(
+                        f"tracking/{side}/raw_trail",
+                        rr.LineStrips3D(
+                            [raw_points], colors=[[*color, 90]], radii=0.0015
+                        ),
+                    )
         except Exception:
             self._healthy = False
-            log.exception("Rerun failed; disabling live view while recording continues.")
+            log.exception(
+                "Rerun failed; disabling live view while recording continues."
+            )
 
 
 def record_episode(
@@ -803,13 +891,23 @@ def record_episode(
             break
 
         if manual_control and xrt is not None:
-            start_pressed = read_start_button_value(xrt, start_button) >= start_threshold
-            repeat_pressed = read_start_button_value(xrt, repeat_button) >= start_threshold
-            finish_pressed = read_start_button_value(xrt, finish_button) >= start_threshold
+            start_pressed = (
+                read_start_button_value(xrt, start_button) >= start_threshold
+            )
+            repeat_pressed = (
+                read_start_button_value(xrt, repeat_button) >= start_threshold
+            )
+            finish_pressed = (
+                read_start_button_value(xrt, finish_button) >= start_threshold
+            )
             start_rise = start_pressed and not prev_start
             repeat_rise = repeat_pressed and not prev_repeat
             finish_rise = finish_pressed and not prev_finish
-            prev_start, prev_repeat, prev_finish = start_pressed, repeat_pressed, finish_pressed
+            prev_start, prev_repeat, prev_finish = (
+                start_pressed,
+                repeat_pressed,
+                finish_pressed,
+            )
             if repeat_rise:
                 status = "repeat"
                 dataset.clear_episode_buffer()
@@ -937,7 +1035,9 @@ def record_episode(
         if sleep > 0:
             time.sleep(sleep)
         else:
-            log.warning("Loop slower than %d Hz (%.1f Hz actual).", fps, 1.0 / max(dt, 1e-6))
+            log.warning(
+                "Loop slower than %d Hz (%.1f Hz actual).", fps, 1.0 / max(dt, 1e-6)
+            )
 
     return n_frames, status
 
@@ -958,7 +1058,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "configs/rig.yaml, then safe defaults."
         ),
     )
-    p.add_argument("--help-advanced", action="store_true", help="Show every expert option.")
+    p.add_argument(
+        "--help-advanced", action="store_true", help="Show every expert option."
+    )
     p.add_argument("--device", choices=("pico", "meta"), default=None)
     p.add_argument(
         "--cameras",
@@ -972,10 +1074,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_RIG_CONFIG,
         help=advanced("Machine-local cameras, Feetech, and Meta Quest configuration."),
     )
-    p.add_argument("--cam-width", type=int, default=None, help=advanced("Camera width."))
-    p.add_argument("--cam-height", type=int, default=None, help=advanced("Camera height."))
-    p.add_argument("--cam-fps", type=int, default=None, help=advanced("Camera capture FPS."))
-    p.add_argument("--feetech-port", type=str, default=None, help=advanced("Legacy shared Feetech port."))
+    p.add_argument(
+        "--cam-width", type=int, default=None, help=advanced("Camera width.")
+    )
+    p.add_argument(
+        "--cam-height", type=int, default=None, help=advanced("Camera height.")
+    )
+    p.add_argument(
+        "--cam-fps", type=int, default=None, help=advanced("Camera capture FPS.")
+    )
+    p.add_argument(
+        "--feetech-port",
+        type=str,
+        default=None,
+        help=advanced("Legacy shared Feetech port."),
+    )
     p.add_argument(
         "--skip-feetech",
         action="store_true",
@@ -999,7 +1112,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--task", type=str, default="HandUMI recording")
     p.add_argument("--episodes", dest="num_episodes", type=int, default=10)
     p.add_argument(
-        "--episode-time-s", type=float, default=60.0, help=advanced("Maximum episode duration.")
+        "--episode-time-s",
+        type=float,
+        default=60.0,
+        help=advanced("Maximum episode duration."),
     )
     p.add_argument("--fps", type=int, default=None, help=advanced("Dataset row rate."))
     p.add_argument(
@@ -1020,16 +1136,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=advanced("Maximum source-to-row synchronization skew."),
     )
-    p.add_argument("--camera-stale-timeout-s", type=float, default=None, help=advanced("Camera freshness timeout."))
-    p.add_argument("--gripper-stale-timeout-s", type=float, default=None, help=advanced("Gripper freshness timeout."))
+    p.add_argument(
+        "--camera-stale-timeout-s",
+        type=float,
+        default=None,
+        help=advanced("Camera freshness timeout."),
+    )
+    p.add_argument(
+        "--gripper-stale-timeout-s",
+        type=float,
+        default=None,
+        help=advanced("Gripper freshness timeout."),
+    )
     p.add_argument(
         "--sensor-loss-timeout-s",
         type=float,
         default=None,
         help=advanced("Discard after a sensor remains unhealthy."),
     )
-    p.add_argument("--feetech-sample-hz", type=float, default=None, help=advanced("Feetech sampler frequency."))
-    p.add_argument("--no-video", action="store_true", default=None, help=advanced("Store individual images instead of MP4."))
+    p.add_argument(
+        "--feetech-sample-hz",
+        type=float,
+        default=None,
+        help=advanced("Feetech sampler frequency."),
+    )
+    p.add_argument(
+        "--no-video",
+        action="store_true",
+        default=None,
+        help=advanced("Store individual images instead of MP4."),
+    )
     p.add_argument(
         "--rerun",
         action="store_true",
@@ -1065,7 +1201,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=advanced("Streaming queue capacity per camera."),
     )
-    p.add_argument("--push-to-hub", action="store_true", help=advanced("Upload after finalization."))
+    p.add_argument(
+        "--push-to-hub",
+        action="store_true",
+        help=advanced("Upload after finalization."),
+    )
     p.add_argument(
         "--dataset-license",
         default="other",
@@ -1100,20 +1240,127 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
 
-    p.add_argument("--quest-ip", type=str, default=None, help=advanced("Quest IP override."))
-    p.add_argument("--tcp-port", type=int, default=None, help=advanced("Quest TCP port override."))
-    p.add_argument("--sync-port", type=int, default=None, help=advanced("Quest sync port override."))
+    p.add_argument(
+        "--quest-ip", type=str, default=None, help=advanced("Quest IP override.")
+    )
+    p.add_argument(
+        "--tcp-port", type=int, default=None, help=advanced("Quest TCP port override.")
+    )
+    p.add_argument(
+        "--sync-port",
+        type=int,
+        default=None,
+        help=advanced("Quest sync port override."),
+    )
 
-    p.add_argument("--pico-mode", choices=("mandos", "object", "whole-body"), default="mandos", help=advanced("PICO tracking mode."))
+    p.add_argument(
+        "--pico-mode",
+        choices=("mandos", "object", "whole-body"),
+        default="mandos",
+        help=advanced("PICO tracking mode."),
+    )
     pico_transport = p.add_mutually_exclusive_group()
-    pico_transport.add_argument("--pico-adb", action="store_true", help=advanced("Use PICO over ADB."))
-    pico_transport.add_argument("--pico-wifi", action="store_true", help=advanced("Use PICO over Wi-Fi."))
-    p.add_argument("--skip-adb-check", action="store_true", help=advanced("Skip PICO ADB validation."))
-    p.add_argument("--start-button", choices=START_BUTTON_CHOICES, default="enter", help=advanced("Episode start button."))
-    p.add_argument("--start-threshold", type=float, default=0.75, help=advanced("Controller button threshold."))
-    p.add_argument("--manual-control", action="store_true", help=advanced("Use PICO controller buttons."))
-    p.add_argument("--repeat-button", choices=START_BUTTON_CHOICES, default="B", help=advanced("Repeat button."))
-    p.add_argument("--finish-button", choices=START_BUTTON_CHOICES, default="Y", help=advanced("Finish button."))
+    pico_transport.add_argument(
+        "--pico-adb", action="store_true", help=advanced("Use PICO over ADB.")
+    )
+    pico_transport.add_argument(
+        "--pico-wifi", action="store_true", help=advanced("Use PICO over Wi-Fi.")
+    )
+    p.add_argument(
+        "--skip-adb-check",
+        action="store_true",
+        help=advanced("Skip PICO ADB validation."),
+    )
+    p.add_argument(
+        "--pico-av",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Record the PICO stereo passthrough camera and microphone with the "
+            "HandUMI XRoboToolkit APK, then add them to the LeRobot dataset."
+        ),
+    )
+    p.add_argument(
+        "--pico-device-id",
+        default=None,
+        help=advanced("XRoboToolkit device/SN used by device_control_json."),
+    )
+    p.add_argument(
+        "--pico-adb-serial",
+        default=None,
+        help=advanced("ADB serial when more than one Android device is connected."),
+    )
+    p.add_argument(
+        "--pico-video-width",
+        type=int,
+        default=2160,
+        help=advanced("PICO side-by-side capture width."),
+    )
+    p.add_argument(
+        "--pico-video-height",
+        type=int,
+        default=810,
+        help=advanced("PICO side-by-side capture height."),
+    )
+    p.add_argument(
+        "--pico-video-fps",
+        type=int,
+        default=30,
+        help=advanced("PICO camera capture rate."),
+    )
+    p.add_argument(
+        "--pico-video-bitrate",
+        type=int,
+        default=20 * 1024 * 1024,
+        help=advanced("PICO H.264 bitrate in bits/s."),
+    )
+    p.add_argument(
+        "--pico-transcribe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=advanced(
+            "Transcribe PICO microphone audio and repeat active text on each dataset frame."
+        ),
+    )
+    p.add_argument(
+        "--pico-transcription-model",
+        default="small",
+        help=advanced("faster-whisper model name."),
+    )
+    p.add_argument(
+        "--pico-language",
+        default=None,
+        help=advanced("ISO speech language such as es or en; default auto-detect."),
+    )
+    p.add_argument(
+        "--start-button",
+        choices=START_BUTTON_CHOICES,
+        default="enter",
+        help=advanced("Episode start button."),
+    )
+    p.add_argument(
+        "--start-threshold",
+        type=float,
+        default=0.75,
+        help=advanced("Controller button threshold."),
+    )
+    p.add_argument(
+        "--manual-control",
+        action="store_true",
+        help=advanced("Use PICO controller buttons."),
+    )
+    p.add_argument(
+        "--repeat-button",
+        choices=START_BUTTON_CHOICES,
+        default="B",
+        help=advanced("Repeat button."),
+    )
+    p.add_argument(
+        "--finish-button",
+        choices=START_BUTTON_CHOICES,
+        default="Y",
+        help=advanced("Finish button."),
+    )
     p.add_argument(
         "--voice-control",
         action=argparse.BooleanOptionalAction,
@@ -1122,8 +1369,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         'or "restart". On by default; --no-voice-control falls back to timed '
         "episodes.",
     )
-    p.add_argument("--voice-device", default=None, help=advanced("Microphone name or index (default: system default)."))
-    p.add_argument("--voice-confidence", type=float, default=0.7, help=advanced("Minimum recognition confidence (0-1)."))
+    p.add_argument(
+        "--voice-device",
+        default=None,
+        help=advanced("Microphone name or index (default: system default)."),
+    )
+    p.add_argument(
+        "--voice-confidence",
+        type=float,
+        default=0.7,
+        help=advanced("Minimum recognition confidence (0-1)."),
+    )
     p.add_argument(
         "--clap-control",
         action="store_true",
@@ -1167,6 +1423,7 @@ def _resolve_recording_args(args: argparse.Namespace) -> argparse.Namespace:
             "robot",
             "session_calibration",
             "controller_tcp_calibration",
+            "pico_av",
         )
     }
     args._explicit_recording = explicit
@@ -1220,7 +1477,9 @@ def _resolve_recording_args(args: argparse.Namespace) -> argparse.Namespace:
             setattr(
                 args,
                 name,
-                resume_values.get(name, rig_values.get(name, _RECORDING_DEFAULTS[name])),
+                resume_values.get(
+                    name, rig_values.get(name, _RECORDING_DEFAULTS[name])
+                ),
             )
 
     if args.session_calibration is None and not args.resume:
@@ -1277,22 +1536,51 @@ def _recording_values_from_dataset(
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    pico_av_enabled = bool(getattr(args, "pico_av", False))
     if (
         getattr(args, "vcodec", None) not in (None, "auto")
         and getattr(args, "encoder", "auto") != "auto"
     ):
-        raise SystemExit("Use either --encoder cpu/gpu or an explicit --vcodec, not both.")
+        raise SystemExit(
+            "Use either --encoder cpu/gpu or an explicit --vcodec, not both."
+        )
     if getattr(args, "encoder_threads", None) is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be greater than zero.")
-    if getattr(args, "encoder_queue_size", None) is not None and args.encoder_queue_size <= 0:
+    if (
+        getattr(args, "encoder_queue_size", None) is not None
+        and args.encoder_queue_size <= 0
+    ):
         raise SystemExit("--encoder-queue-size must be greater than zero.")
     if args.manual_control and args.device != "pico":
         raise SystemExit("--manual-control currently requires --device pico.")
+    if pico_av_enabled and args.device != "pico":
+        raise SystemExit("--pico-av requires --device pico.")
+    if pico_av_enabled and not args.pico_device_id:
+        raise SystemExit(
+            "--pico-av requires --pico-device-id (the SN/device ID shown in XRoboToolkit)."
+        )
+    if pico_av_enabled and args.resume:
+        raise SystemExit(
+            "--pico-av cannot resume a dataset yet; record a new synchronized dataset."
+        )
+    if pico_av_enabled:
+        for name in (
+            "pico_video_width",
+            "pico_video_height",
+            "pico_video_fps",
+            "pico_video_bitrate",
+        ):
+            if getattr(args, name) <= 0:
+                raise SystemExit(
+                    f"--{name.replace('_', '-')} must be greater than zero."
+                )
     if args.manual_control and args.start_button == "enter":
         args.start_button = "A"
         log.info("--manual-control set: using PICO A as start/stop button.")
     if args.clap_control and args.skip_feetech:
-        raise SystemExit("--clap-control needs real Feetech widths; drop --skip-feetech.")
+        raise SystemExit(
+            "--clap-control needs real Feetech widths; drop --skip-feetech."
+        )
     if args.clap_control and args.manual_control:
         raise SystemExit("--clap-control and --manual-control are mutually exclusive.")
     if getattr(args, "voice_control", False) and not (
@@ -1350,7 +1638,9 @@ def _print_recording_plan(
         encoder_label = "disabled (individual images)"
     else:
         kind = "hardware" if encoder.hardware else "CPU"
-        thread_label = "codec-managed" if encoder.threads is None else str(encoder.threads)
+        thread_label = (
+            "codec-managed" if encoder.threads is None else str(encoder.threads)
+        )
         encoder_label = f"{encoder.vcodec} ({kind}, threads/camera={thread_label})"
     camera_label = ", ".join(
         (
@@ -1372,6 +1662,12 @@ def _print_recording_plan(
     print(f"  Feetech:  {'disabled' if args.skip_feetech else 'enabled'}")
     print(f"  Encoder:  {encoder_label}")
     print(f"  Workspace: {workspace}; Controller->TCP: {calibration_source}")
+    if args.pico_av:
+        print(
+            "  PICO A/V: stereo "
+            f"{args.pico_video_width}x{args.pico_video_height}/{args.pico_video_fps} fps + "
+            f"microphone; transcript={'on' if args.pico_transcribe else 'off'}"
+        )
     if args.dry_run:
         print("  Result:   plan resolved; hardware was not opened")
 
@@ -1517,7 +1813,9 @@ def main() -> None:
             )
         set_workspace = getattr(tracker, "set_workspace_from_device_pose", None)
         if set_workspace is None:
-            raise SystemExit("Selected tracking backend cannot apply a table calibration.")
+            raise SystemExit(
+                "Selected tracking backend cannot apply a table calibration."
+            )
         if args.session_calibration is not None:
             table_from_device = session_table_from_device(args.session_calibration)
         else:
@@ -1529,6 +1827,21 @@ def main() -> None:
             table_from_device = pose7_from_dict(embedded_pose)
         set_workspace(table_from_device, locked=True)
     tracker.start()
+
+    pico_av: PicoAvController | None = None
+    pico_captures: list[PicoAvCapture] = []
+    if args.pico_av:
+        pico_av = PicoAvController(
+            xrt=getattr(tracker, "xrt"),
+            device_id=args.pico_device_id,
+            output_root=args.output_dir,
+            adb_serial=args.pico_adb_serial,
+            width=args.pico_video_width,
+            height=args.pico_video_height,
+            fps=args.pico_video_fps,
+            bitrate=args.pico_video_bitrate,
+            record_audio=True,
+        )
 
     log.info("--- Camera setup ---")
     cameras = connect_cameras(
@@ -1613,18 +1926,24 @@ def main() -> None:
     clap_detector = DoubleClapDetector() if args.clap_control else None
     restart_active = False
     try:
-        while (args.num_episodes <= 0 or recorded < args.num_episodes) and not stop_event.is_set():
+        while (
+            args.num_episodes <= 0 or recorded < args.num_episodes
+        ) and not stop_event.is_set():
             ep_num = dataset.num_episodes + 1
             ep_total = "inf" if args.num_episodes <= 0 else str(args.num_episodes)
             log.info("--- Episode %d/%s ---", ep_num, ep_total)
             if rerun is not None:
-                rerun.set_status("WAITING", f"Episode {ep_num}/{ep_total}: waiting to start")
+                rerun.set_status(
+                    "WAITING", f"Episode {ep_num}/{ep_total}: waiting to start"
+                )
             if voice is not None or clap_detector is not None:
                 if restart_active:
                     restart_active = False
                     log.info("  Restarting episode %d immediately ...", ep_num)
                     if rerun is not None:
-                        rerun.set_status("RESTARTED", f"Episode {ep_num}/{ep_total}: restarting now")
+                        rerun.set_status(
+                            "RESTARTED", f"Episode {ep_num}/{ep_total}: restarting now"
+                        )
                 else:
                     log.info(
                         "  %s to start episode %d ...",
@@ -1661,42 +1980,57 @@ def main() -> None:
                 ):
                     break
             else:
-                raise SystemExit("--start-button other than enter currently requires --device pico.")
+                raise SystemExit(
+                    "--start-button other than enter currently requires --device pico."
+                )
 
             if not _wait_for_tracking(tracker, stop_event):
                 break
+            pending_pico_av = (
+                pico_av.start_episode(dataset.num_episodes)
+                if pico_av is not None
+                else None
+            )
             announce(f"Recording episode {ep_num}")
             if rerun is not None:
-                rerun.set_status("RECORDING", f"Episode {ep_num}/{ep_total} is being recorded")
-            n_frames, status = record_episode(
-                dataset=dataset,
-                cameras=cameras,
-                cam_names=cam_names,
-                tracker=tracker,
-                grippers=grippers,
-                episode_time_s=args.episode_time_s,
-                fps=args.fps,
-                task=args.task,
-                cam_width=args.cam_width,
-                cam_height=args.cam_height,
-                stop_event=stop_event,
-                manual_control=args.manual_control,
-                start_button=args.start_button,
-                repeat_button=args.repeat_button,
-                finish_button=args.finish_button,
-                start_threshold=args.start_threshold,
-                clap_detector=clap_detector,
-                voice=voice,
-                tracking_loss_timeout_s=args.tracking_loss_timeout_s,
-                sync_lag_s=args.sync_lag_s,
-                max_sync_skew_s=args.max_sync_skew_s,
-                camera_stale_timeout_s=args.camera_stale_timeout_s,
-                gripper_stale_timeout_s=args.gripper_stale_timeout_s,
-                sensor_loss_timeout_s=args.sensor_loss_timeout_s,
-                rerun=rerun,
-            )
+                rerun.set_status(
+                    "RECORDING", f"Episode {ep_num}/{ep_total} is being recorded"
+                )
+            try:
+                n_frames, status = record_episode(
+                    dataset=dataset,
+                    cameras=cameras,
+                    cam_names=cam_names,
+                    tracker=tracker,
+                    grippers=grippers,
+                    episode_time_s=args.episode_time_s,
+                    fps=args.fps,
+                    task=args.task,
+                    cam_width=args.cam_width,
+                    cam_height=args.cam_height,
+                    stop_event=stop_event,
+                    manual_control=args.manual_control,
+                    start_button=args.start_button,
+                    repeat_button=args.repeat_button,
+                    finish_button=args.finish_button,
+                    start_threshold=args.start_threshold,
+                    clap_detector=clap_detector,
+                    voice=voice,
+                    tracking_loss_timeout_s=args.tracking_loss_timeout_s,
+                    sync_lag_s=args.sync_lag_s,
+                    max_sync_skew_s=args.max_sync_skew_s,
+                    camera_stale_timeout_s=args.camera_stale_timeout_s,
+                    gripper_stale_timeout_s=args.gripper_stale_timeout_s,
+                    sensor_loss_timeout_s=args.sensor_loss_timeout_s,
+                    rerun=rerun,
+                )
+            finally:
+                if pico_av is not None and pending_pico_av is not None:
+                    pico_av.stop_episode(pending_pico_av)
             if status == "repeat":
-                log.warning("Episode restart requested (%d frames discarded).", n_frames)
+                log.warning(
+                    "Episode restart requested (%d frames discarded).", n_frames
+                )
                 announce("Restart recording")
                 if rerun is not None:
                     rerun.set_status(
@@ -1704,8 +2038,26 @@ def main() -> None:
                         f"Episode {ep_num}/{ep_total}: {n_frames} frames discarded; restarting",
                     )
                 dataset.clear_episode_buffer()
+                if pico_av is not None and pending_pico_av is not None:
+                    pico_av.wait_episode_stopped(pending_pico_av)
                 restart_active = True
                 continue
+            collected_pico_av: PicoAvCapture | None = None
+            if pico_av is not None and pending_pico_av is not None:
+                try:
+                    collected_pico_av = pico_av.collect_episode(
+                        pending_pico_av,
+                        frame_count=n_frames,
+                    )
+                except Exception as exc:
+                    log.error(
+                        "Episode discarded because PICO A/V collection failed: %s", exc
+                    )
+                    announce("Episode discarded")
+                    dataset.clear_episode_buffer()
+                    if status == "finish":
+                        break
+                    continue
             if n_frames == 0 or status in {
                 "tracking_lost",
                 "sensor_unhealthy",
@@ -1734,6 +2086,8 @@ def main() -> None:
                         break
                     continue
             dataset.save_episode()
+            if collected_pico_av is not None:
+                pico_captures.append(collected_pico_av)
             recorded += 1
             log.info("Episode %d saved (%d frames).", ep_num, n_frames)
             announce(f"Episode {ep_num} saved, {n_frames} frames")
@@ -1748,13 +2102,25 @@ def main() -> None:
         if voice is not None:
             voice.stop()
         if rerun is not None:
-            rerun.set_status("STOPPED", f"Recording stopped: {recorded} episode(s) saved")
+            rerun.set_status(
+                "STOPPED", f"Recording stopped: {recorded} episode(s) saved"
+            )
         announce("Stop recording", blocking=True)
         log.info("--- Finalising ---")
         finalization_error: BaseException | None = None
         try:
             dataset.finalize()
             root = Path(dataset.root)
+            if pico_captures:
+                updated_pico_info = augment_lerobot_dataset_with_pico_av(
+                    root,
+                    pico_captures,
+                    transcribe=args.pico_transcribe,
+                    transcription_model=args.pico_transcription_model,
+                    language=args.pico_language,
+                    max_sync_skew_s=args.max_sync_skew_s,
+                )
+                dataset.meta.info = updated_pico_info
             handumi_metadata = _resume_handumi_metadata(
                 args=args,
                 camera_specs=camera_specs,
@@ -1822,7 +2188,9 @@ def build_tracker(
         frame_stale_timeout_s=base.frame_stale_timeout_s,
     )
     return MetaQuestTrackingProvider(
-        config=config, calibration=calibration, reset_workspace_on_x=reset_workspace_on_x
+        config=config,
+        calibration=calibration,
+        reset_workspace_on_x=reset_workspace_on_x,
     )
 
 
@@ -1867,7 +2235,9 @@ def _start_voice_control(
         listener.start()
     except VoiceUnavailableError as exc:
         if clap_control:
-            log.warning("Voice control unavailable (%s); using gripper squeezes only.", exc)
+            log.warning(
+                "Voice control unavailable (%s); using gripper squeezes only.", exc
+            )
             return None
         raise SystemExit(f"Voice control unavailable.\n{exc}") from exc
     return listener
@@ -1890,9 +2260,12 @@ def _wait_for_start_trigger(
             return True
         if clap_detector is not None:
             widths = _latest_gripper_widths(grippers)
-            if clap_detector.update_side(
-                widths.left_mm, widths.right_mm, time.perf_counter()
-            ) == "right":
+            if (
+                clap_detector.update_side(
+                    widths.left_mm, widths.right_mm, time.perf_counter()
+                )
+                == "right"
+            ):
                 return True
         time.sleep(0.02)
     return False
@@ -1959,7 +2332,9 @@ def _capture_sources_metadata(
     }
 
 
-def _robot_metadata(name: str, config_dir: Path = ROBOT_CONFIG_DIR) -> dict[str, object]:
+def _robot_metadata(
+    name: str, config_dir: Path = ROBOT_CONFIG_DIR
+) -> dict[str, object]:
     path = config_dir / f"{name}.yaml"
     if not path.exists():
         available = ", ".join(sorted(item.stem for item in config_dir.glob("*.yaml")))
@@ -1989,7 +2364,9 @@ def _recording_tcp_calibration_metadata(
         raise SystemExit(f"Robot {robot!r} has invalid configuration metadata.")
 
     configured = configuration.get("controller_tcp_calibrations") or {}
-    configured_path_value = configured.get(device) if isinstance(configured, dict) else None
+    configured_path_value = (
+        configured.get(device) if isinstance(configured, dict) else None
+    )
     associated_with_robot_tool = configured_path_value is not None
     if explicit_path is not None:
         calibration_path = explicit_path
@@ -2037,9 +2414,7 @@ def _validate_unique_camera_ids(
     camera_ids: list[int | str],
 ) -> None:
     duplicates = {
-        camera_id
-        for camera_id in camera_ids
-        if camera_ids.count(camera_id) > 1
+        camera_id for camera_id in camera_ids if camera_ids.count(camera_id) > 1
     }
     if duplicates:
         mappings = ", ".join(
@@ -2077,12 +2452,12 @@ def _resume_handumi_metadata(
         else {
             "tracking": {"enabled": True},
             "feetech": {"enabled": not args.skip_feetech},
-            "cameras": {
-                str(spec["name"]): {"enabled": True} for spec in camera_specs
-            },
+            "cameras": {str(spec["name"]): {"enabled": True} for spec in camera_specs},
         }
     )
-    is_legacy_resume = bool(getattr(args, "resume", False)) and isinstance(embedded, dict)
+    is_legacy_resume = bool(getattr(args, "resume", False)) and isinstance(
+        embedded, dict
+    )
 
     def stable_value(key: str, current: object) -> object:
         if is_legacy_resume and isinstance(embedded, dict) and key not in embedded:
@@ -2120,12 +2495,8 @@ def _resume_handumi_metadata(
                 "name": spec["name"],
                 "index_or_path": spec["id"],
                 "type": spec.get("type", "opencv"),
-                "capture_width": spec.get(
-                    "width", getattr(args, "cam_width", 640)
-                ),
-                "capture_height": spec.get(
-                    "height", getattr(args, "cam_height", 480)
-                ),
+                "capture_width": spec.get("width", getattr(args, "cam_width", 640)),
+                "capture_height": spec.get("height", getattr(args, "cam_height", 480)),
                 "output_width": camera_output_size(
                     spec,
                     default_width=getattr(args, "cam_width", 640),
@@ -2197,7 +2568,9 @@ def _validate_resume_target(
     try:
         info = json.loads((root / "meta" / "info.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"Cannot resume: invalid meta/info.json in {root}: {exc}") from exc
+        raise SystemExit(
+            f"Cannot resume: invalid meta/info.json in {root}: {exc}"
+        ) from exc
 
     mismatches: list[str] = []
     if int(info.get("fps", 0)) != int(fps):
@@ -2223,7 +2596,9 @@ def _validate_resume_target(
         actual = _canonical_feature(actual_features[key])
         expected = _canonical_feature(features[key])
         if actual != expected:
-            mismatches.append(f"feature {key}: dataset={actual!r}, requested={expected!r}")
+            mismatches.append(
+                f"feature {key}: dataset={actual!r}, requested={expected!r}"
+            )
         feature = actual_features[key]
         if (
             vcodec not in (None, "auto")
@@ -2231,7 +2606,9 @@ def _validate_resume_target(
             and feature.get("dtype") == "video"
         ):
             video_info = feature.get("info") or {}
-            actual_codec = video_info.get("video.codec") if isinstance(video_info, dict) else None
+            actual_codec = (
+                video_info.get("video.codec") if isinstance(video_info, dict) else None
+            )
             requested_codec = _canonical_video_codec(vcodec)
             if actual_codec is not None and actual_codec != requested_codec:
                 mismatches.append(
@@ -2290,7 +2667,9 @@ def _validate_resume_target(
         actual = _metadata_fingerprint(actual_handumi.get(key), fields)
         expected = _metadata_fingerprint(handumi.get(key), fields)
         if actual != expected:
-            mismatches.append(f"handumi.{key}: dataset={actual!r}, requested={expected!r}")
+            mismatches.append(
+                f"handumi.{key}: dataset={actual!r}, requested={expected!r}"
+            )
 
     if mismatches:
         details = "\n  - ".join(mismatches)
@@ -2405,10 +2784,14 @@ def _validate_finalized_lerobot_dataset(root: Path) -> None:
         if isinstance(feature, dict) and feature.get("dtype") == "video"
     ]
     missing_videos = [
-        key for key in video_keys if not list((root / "videos" / key).glob("chunk-*/*.mp4"))
+        key
+        for key in video_keys
+        if not list((root / "videos" / key).glob("chunk-*/*.mp4"))
     ]
     if missing_videos:
-        raise RuntimeError(f"Dataset is missing videos for: {', '.join(missing_videos)}.")
+        raise RuntimeError(
+            f"Dataset is missing videos for: {', '.join(missing_videos)}."
+        )
 
 
 def _normalize_camera_list(value: object) -> list[str]:
