@@ -133,10 +133,37 @@ when adding another simulation model or hardware backend.
 
 ## 5. Publish Accepted Data
 
-Upload only after the replay and validation checks pass:
+Upload only after the recorder has printed its final integrity-validation
+success and exited. Prefer the recorder's built-in upload, which finalizes and
+closes every Parquet writer before publishing:
+
+```bash
+handumi record --output-dir outputs/datasets/handumi-demo \
+  --task "pick and place" --episodes 20 --push-to-hub \
+  --repo-id your-name/handumi-demo
+```
+
+For a previously finalized directory, manual upload is also safe after
+`handumi validate` finishes. Never upload the output directory concurrently
+with `handumi record`; an open Parquet file has no footer yet and will look
+corrupt on the Hub.
 
 ```bash
 hf auth login
 huggingface-cli upload your-name/handumi-demo \
   outputs/datasets/handumi-demo --repo-type dataset
 ```
+
+If an interrupted or concurrent upload already left only
+`meta/episodes/...parquet` truncated while the data and videos are intact,
+download a local copy and rebuild that file without discarding frames:
+
+```bash
+handumi repair-metadata outputs/datasets/handumi-demo
+```
+
+The damaged file is retained with a `.corrupt` suffix and the replacement is
+written atomically. For a prematurely uploaded `handumi_raw` dataset, the
+command also restores schema and source-enablement fields that can be proven
+from the captured columns. It does not guess missing device or calibration
+metadata.

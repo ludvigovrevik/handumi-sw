@@ -24,6 +24,10 @@ COMMANDS = {
     ),
     ("record",): Command("handumi.scripts.record", "Record demonstrations"),
     ("validate",): Command("handumi.scripts.validate", "Validate recorded episodes"),
+    ("repair-metadata",): Command(
+        "handumi.scripts.repair_metadata",
+        "Rebuild missing or truncated episode metadata",
+    ),
     ("replay",): Command(
         "handumi.scripts.replay.replay_in_sim", "Replay a dataset in simulation"
     ),
