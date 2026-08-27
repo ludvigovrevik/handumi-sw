@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,6 @@ class Command:
 
 COMMANDS = {
     ("doctor",): Command("handumi.scripts.doctor", "Check recording readiness"),
-    ("setup",): Command("handumi.scripts.setup.setup_hardware", "Run guided setup"),
     ("setup", "ports"): Command(
         "handumi.scripts.setup.setup_ports", "Identify cameras and serial ports"
     ),
@@ -31,25 +29,8 @@ COMMANDS = {
     ("completion",): Command(
         "handumi.scripts.completion", "Enable Bash, Zsh, or Fish completion"
     ),
-    ("teleop",): Command(
-        "handumi.scripts.teleop_sim",
-        "Teleoperate in simulation",
-    ),
-    ("teleop-real",): Command(
-        "handumi.scripts.teleop_real",
-        "Teleoperate a physical robot",
-    ),
-    ("teleop-record",): Command(
-        "handumi.scripts.teleop_record",
-        "Record real-robot teleoperation demonstrations",
-    ),
-    ("camera", "pico"): Command("handumi.scripts.pico_camera", "Stream cameras to PICO"),
     ("calibrate", "grippers"): Command(
         "handumi.scripts.setup.calibrate_grippers", "Calibrate Feetech grippers"
-    ),
-    ("calibrate", "openarm-grippers"): Command(
-        "handumi.scripts.setup.calibrate_openarm_grippers",
-        "Calibrate OpenArm grippers",
     ),
     ("calibrate", "spatial"): Command(
         "handumi.scripts.setup.calibrate_spatial", "Calibrate cameras and workspace"
@@ -64,9 +45,6 @@ COMMANDS = {
     ("servo", "home"): Command("handumi.scripts.setup.home_servos", "Home Feetech servos"),
     ("servo", "set-id"): Command(
         "handumi.scripts.setup.set_servo_id", "Assign a Feetech servo ID"
-    ),
-    ("tracking", "pose"): Command(
-        "handumi.scripts.setup.print_controller_pose", "Print live controller poses"
     ),
 }
 
@@ -124,11 +102,6 @@ def main(argv: list[str] | None = None) -> None:
         )
     path, command = match
     rest = values[len(path) :]
-    if path in {("teleop-real",), ("teleop-record",)}:
-        # This IK is a tiny latency-sensitive dense solve. On the supported
-        # NVIDIA setup, CPU execution has far lower tail latency than CUDA.
-        # Respect an explicit user override for benchmarking/debugging.
-        os.environ.setdefault("JAX_PLATFORMS", "cpu")
     module = importlib.import_module(command.module)
     previous_argv = sys.argv
     try:
