@@ -1,5 +1,9 @@
 """Live visualization helpers."""
 
-from handumi.visualize.cameras import LiveCameraViews, RerunCameraViewer
+from handumi.visualize.cameras import (
+    LiveCameraViews,
+    OpenCVCameraViewer,
+    RerunCameraViewer,
+)
 
-__all__ = ["LiveCameraViews", "RerunCameraViewer"]
+__all__ = ["LiveCameraViews", "OpenCVCameraViewer", "RerunCameraViewer"]

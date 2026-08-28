@@ -44,8 +44,6 @@ from handumi.cameras.base import CameraDevice
 from handumi.config import DEFAULT_RIG_CONFIG, load_rig_section
 from handumi.robots.utils import IDENTITY_POSE7, pose7_to_mat
 from handumi.tracking.base import TrackingProvider
-from handumi.tracking.meta_quest import MetaQuestConfig, MetaQuestTrackingProvider
-from handumi.tracking.pico import PicoTrackingProvider
 from handumi.utils.trajectory import TrajectoryTrail
 from handumi.visualization import BACKGROUND_COLOR, LEFT_COLOR, RIGHT_COLOR
 
@@ -445,39 +443,26 @@ def _connect_tracker(
     *,
     calibration: ControllerTcpCalibration | None = None,
 ) -> TrackingProvider:
-    calibration = calibration or _identity_tcp_calibration()
-    if args.device == "pico":
-        transport = "wifi" if args.pico_wifi else "adb"
-        tracker = PicoTrackingProvider(
-            calibration=calibration,
-            mode=args.pico_mode,
-            transport=transport,
-            skip_adb_check=args.skip_adb_check,
-        )
-        log.info("Connecting to PICO through XRoboToolkit (%s) ...", transport)
-    else:
-        base = MetaQuestConfig.from_yaml(args.rig_config)
-        config = MetaQuestConfig(
-            quest_ip=args.quest_ip or base.quest_ip,
-            tcp_port=args.tcp_port or base.tcp_port,
-            sync_port=args.sync_port or base.sync_port,
-            connect_retry_s=base.connect_retry_s,
-            frame_stale_timeout_s=base.frame_stale_timeout_s,
-        )
-        tracker = MetaQuestTrackingProvider(
-            config=config,
-            calibration=calibration,
-            reset_workspace_on_x=False,
-        )
-        log.info("Connecting to Quest at %s:%d ...", config.quest_ip, config.tcp_port)
-    tracker.start()
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if tracker.latest().streaming:
-            return tracker
-        time.sleep(0.1)
-    tracker.stop()
-    raise SystemExit(f"{args.device} tracking did not start streaming within 15 seconds.")
+    """No live tracker exists on the Lito rig.
+
+    Upstream calibrated the controller mount and table frame against a VR
+    headset streaming pose in real time. We dropped VR: pose is solved offline
+    by VIO, so there is nothing to connect to during calibration.
+
+    Still working, because they need only the camera and the ChArUco board:
+        inspect-board   check board detection
+        intrinsics      calibrate one camera
+        workspace       inspect a stored workspace pose
+
+    The mount/session/verify/visualize flows need replacing with a VIO-based
+    equivalent -- see RIG-SPECS.md "Calibration -- the fleet question".
+    """
+    raise SystemExit(
+        "This subcommand needed the VR tracker, which the Lito fork removed. "
+        "Pose comes from offline VIO now, so there is no live pose to "
+        "calibrate against. Use 'inspect-board' or 'intrinsics', which "
+        "need only the camera."
+    )
 
 
 def cmd_inspect(args: argparse.Namespace) -> None:

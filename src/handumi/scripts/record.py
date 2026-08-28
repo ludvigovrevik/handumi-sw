@@ -41,12 +41,23 @@ from typing import Any, Protocol, cast
 import numpy as np
 import yaml
 
-from handumi.audio import (
-    AudioCaptureError,
-    PicoAudioRecorder,
-    audio_metadata,
-    validate_audio_files,
-)
+# Upstream captured audio through the VR headset's mic API (handumi/audio.py,
+# removed with the fork). audio_recorder is always None below, so these stubs
+# just keep the call sites intact until a plain-USB-mic recorder replaces it.
+
+
+class AudioCaptureError(RuntimeError):
+    """Kept so existing except-clauses still resolve."""
+
+
+def audio_metadata(*_args, **_kwargs) -> dict:
+    return {}
+
+
+def validate_audio_files(*_args, **_kwargs) -> None:
+    return None
+
+
 from handumi.calibration.control_tcp import (
     ControllerTcpCalibration,
     calibration_path_for_device,
@@ -96,14 +107,7 @@ from handumi.synchronization import (
 )
 from handumi.tracking.base import ControllerPairSample, TrackingProvider
 from handumi.tracking.gestures import BilateralClapArbiter, DoubleClapDetector
-from handumi.tracking.meta_quest import MetaQuestConfig, MetaQuestTrackingProvider
-from handumi.tracking.pico import (
-    START_BUTTON_CHOICES,
-    PicoTrackingProvider,
-    read_start_button_value,
-    wait_for_manual_start,
-    wait_for_start_button,
-)
+from handumi.tracking.offline import POSE_SOURCE, OfflinePoseTracker
 from handumi.tracking.transforms import Pose
 from handumi.utils.speech import log_say
 from handumi.utils.trajectory import TrajectoryTrail
@@ -922,8 +926,6 @@ def record_episode(
     stop_event: threading.Event,
     manual_control: bool,
     start_button: str,
-    repeat_button: str,
-    finish_button: str,
     start_threshold: float,
     clap_detector: DoubleClapDetector | None = None,
     clap_arbiter: BilateralClapArbiter | None = None,
@@ -943,22 +945,9 @@ def record_episode(
     status = "recorded"
     advance_after_save = False
     clap_control = clap_detector is not None
-    xrt = getattr(tracker, "xrt", None)
-    prev_start = (
-        read_start_button_value(xrt, start_button) >= start_threshold
-        if manual_control and xrt is not None
-        else False
-    )
-    prev_repeat = (
-        read_start_button_value(xrt, repeat_button) >= start_threshold
-        if manual_control and xrt is not None
-        else False
-    )
-    prev_finish = (
-        read_start_button_value(xrt, finish_button) >= start_threshold
-        if manual_control and xrt is not None
-        else False
-    )
+    # No headset, so no controller buttons: episode control is voice, clap, or ENTER.
+    xrt = None
+    prev_start = prev_repeat = prev_finish = False
 
     # Clap/voice start episodes hands-free. Once recording, another stop
     # command saves the episode. --episode-time-s is an optional max duration.
@@ -995,25 +984,6 @@ def record_episode(
                     (tracking_now_ns - tracking_lost_since_ns) / 1e9,
                 )
             break
-
-        if manual_control and xrt is not None:
-            start_pressed = read_start_button_value(xrt, start_button) >= start_threshold
-            repeat_pressed = read_start_button_value(xrt, repeat_button) >= start_threshold
-            finish_pressed = read_start_button_value(xrt, finish_button) >= start_threshold
-            start_rise = start_pressed and not prev_start
-            repeat_rise = repeat_pressed and not prev_repeat
-            finish_rise = finish_pressed and not prev_finish
-            prev_start, prev_repeat, prev_finish = start_pressed, repeat_pressed, finish_pressed
-            if repeat_rise:
-                status = "repeat"
-                dataset.clear_episode_buffer()
-                break
-            if finish_rise:
-                status = "finish"
-                break
-            if start_rise:
-                status = "recorded"
-                break
 
         target_time_ns = max(episode_start_ns, tracking_now_ns - sync_lag_ns)
         cam_frames, camera_health = read_camera_samples(
@@ -1344,11 +1314,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pico_transport.add_argument("--pico-adb", action="store_true", help=advanced("Use PICO over ADB."))
     pico_transport.add_argument("--pico-wifi", action="store_true", help=advanced("Use PICO over Wi-Fi."))
     p.add_argument("--skip-adb-check", action="store_true", help=advanced("Skip PICO ADB validation."))
-    p.add_argument("--start-button", choices=START_BUTTON_CHOICES, default="enter", help=advanced("Episode start button."))
+    p.add_argument("--start-button", choices=["enter"], default="enter", help=advanced("Episode start control (ENTER; voice/clap are hands-free)."))
     p.add_argument("--start-threshold", type=float, default=0.75, help=advanced("Controller button threshold."))
     p.add_argument("--manual-control", action="store_true", help=advanced("Use PICO controller buttons."))
-    p.add_argument("--repeat-button", choices=START_BUTTON_CHOICES, default="B", help=advanced("Repeat button."))
-    p.add_argument("--finish-button", choices=START_BUTTON_CHOICES, default="Y", help=advanced("Finish button."))
     p.add_argument(
         "--voice-control",
         action=argparse.BooleanOptionalAction,
@@ -1883,15 +1851,7 @@ def main() -> None:
                 ("Double-squeeze BOTH", "Discard current episode and finish"),
             )
         )
-    if args.manual_control:
-        controls.extend(
-            (
-                (args.start_button, "Save / advance"),
-                (args.repeat_button, "Discard / re-record"),
-                (args.finish_button, "Save and finish session"),
-            )
-        )
-    elif voice is None and not args.clap_control:
+    if voice is None and not args.clap_control:
         controls.append((str(args.start_button), "Start recording"))
     controls.append(("Esc / Ctrl+C", "Discard current episode and stop"))
     dashboard = _RecordingDashboard(
@@ -1910,7 +1870,7 @@ def main() -> None:
     # episode to start right away, without waiting for another trigger.
     pending_start: str | None = None
     audio_recorder = (
-        PicoAudioRecorder(lambda: getattr(tracker, "xrt", None), Path(dataset.root))
+        None  # PicoAudioRecorder streamed mic audio through the headset (removed)
         if args.record_audio
         else None
     )
@@ -1969,28 +1929,10 @@ def main() -> None:
                     clap_detector.reset()
                 if clap_arbiter is not None:
                     clap_arbiter.reset()
-            elif args.manual_control:
-                action = wait_for_manual_start(
-                    getattr(tracker, "xrt"),
-                    start_button=args.start_button,
-                    finish_button=args.finish_button,
-                    threshold=args.start_threshold,
-                    stop_event=stop_event,
-                )
-                if action == "finish":
-                    break
-            elif args.start_button == "enter":
-                input(f"  Press ENTER to start recording episode {ep_num} ...")
-            elif args.device == "pico":
-                if not wait_for_start_button(
-                    getattr(tracker, "xrt"),
-                    button=args.start_button,
-                    threshold=args.start_threshold,
-                    stop_event=stop_event,
-                ):
-                    break
             else:
-                raise SystemExit("--start-button other than enter currently requires --device pico.")
+                # VR controller buttons are gone with the headset; ENTER is the
+                # manual fallback. Hands-free control is voice or clap.
+                input(f"  Press ENTER to start recording episode {ep_num} ...")
 
             if not _wait_for_tracking(tracker, stop_event):
                 break
@@ -2020,8 +1962,6 @@ def main() -> None:
                     stop_event=stop_event,
                     manual_control=args.manual_control,
                     start_button=args.start_button,
-                    repeat_button=args.repeat_button,
-                    finish_button=args.finish_button,
                     start_threshold=args.start_threshold,
                     clap_detector=clap_detector,
                     clap_arbiter=clap_arbiter,
@@ -2203,26 +2143,12 @@ def main() -> None:
 def build_tracker(
     args: argparse.Namespace, calibration, *, reset_workspace_on_x: bool = True
 ) -> TrackingProvider:
-    if args.device == "pico":
-        transport = "wifi" if args.pico_wifi else "adb"
-        return PicoTrackingProvider(
-            calibration=calibration,
-            mode=args.pico_mode,
-            transport=transport,
-            skip_adb_check=args.skip_adb_check,
-        )
+    """Always the offline placeholder -- pose is solved by VIO after capture.
 
-    base = MetaQuestConfig.from_yaml(args.rig_config)
-    config = MetaQuestConfig(
-        quest_ip=args.quest_ip if args.quest_ip is not None else base.quest_ip,
-        tcp_port=args.tcp_port if args.tcp_port is not None else base.tcp_port,
-        sync_port=args.sync_port if args.sync_port is not None else base.sync_port,
-        connect_retry_s=base.connect_retry_s,
-        frame_stale_timeout_s=base.frame_stale_timeout_s,
-    )
-    return MetaQuestTrackingProvider(
-        config=config, calibration=calibration, reset_workspace_on_x=reset_workspace_on_x
-    )
+    Upstream chose between PICO and Meta Quest here. Both are gone: we dropped
+    the headset and the PC. See handumi/tracking/offline.py.
+    """
+    return OfflinePoseTracker()
 
 
 def connect_feetech(args: argparse.Namespace) -> FeetechGripperPair | None:

@@ -121,16 +121,15 @@ def collect_doctor_checks(
 
     checks.append(_voice_check())
 
-    if device == "meta":
-        quest = rig.get("meta_quest") if isinstance(rig, dict) else None
-        connection = quest.get("connection") if isinstance(quest, dict) else None
-        ip = connection.get("quest_ip") if isinstance(connection, dict) else None
-        status = "warn" if not ip or str(ip) == "192.168.1.100" else "pass"
-        checks.append(DoctorCheck("Meta Quest", status, f"quest_ip={ip or 'missing'}"))
+    # Pose is solved offline by VIO, so there is no live tracker to check. What
+    # matters instead is that the IMU is configured -- without it a session
+    # cannot become a trajectory later, no matter how good the video is.
+    imu = rig.get("imu") if isinstance(rig, dict) else None
+    if isinstance(imu, dict) and imu.get("port"):
+        checks.append(DoctorCheck("imu", "pass", str(imu.get("port"))))
     else:
-        adb = shutil.which("adb")
         checks.append(
-            DoctorCheck("PICO ADB", "pass" if adb else "fail", adb or "adb not found")
+            DoctorCheck("imu", "fail", "not configured - sessions will not be usable")
         )
 
     robot_config = Path("configs/robots") / f"{robot}.yaml"

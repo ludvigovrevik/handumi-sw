@@ -33,6 +33,12 @@ class DoubleClapDetector:
         self._window_s = window_s
         self._armed = {"left": True, "right": True}  # seen open since last clap
         self._last_clap_t: dict[str, float | None] = {"left": None, "right": None}
+        self._last_clap_edges: tuple[str, ...] = ()
+
+    @property
+    def last_clap_edges(self) -> tuple[str, ...]:
+        """Sides whose close threshold was crossed in the latest update."""
+        return self._last_clap_edges
 
     def reset(self) -> None:
         """Forget partial gestures and wait for both grippers to reopen.
@@ -45,6 +51,7 @@ class DoubleClapDetector:
         for side in self._armed:
             self._armed[side] = False
             self._last_clap_t[side] = None
+        self._last_clap_edges = ()
 
     def update(self, left_mm: float, right_mm: float, now_s: float) -> bool:
         """Feed one width sample; returns True when either side double-claps."""
@@ -62,21 +69,28 @@ class DoubleClapDetector:
     ) -> tuple[str, ...]:
         """Return every side that completed a double clap in this sample."""
         triggered: list[str] = []
+        clap_edges: list[str] = []
         for side, mm in (("left", left_mm), ("right", right_mm)):
-            if mm > self._open_mm:
+            # Calibrated widths are commonly clipped exactly at a configured
+            # endpoint.  Inclusive thresholds avoid making one physical side
+            # impossible to re-arm merely because its last sample lands on
+            # ``open_mm`` (or impossible to clap at exactly ``close_mm``).
+            if mm >= self._open_mm:
                 self._armed[side] = True
                 last = self._last_clap_t[side]
                 if last is not None and now_s - last > self._window_s:
                     self._last_clap_t[side] = None  # first clap expired
                 continue
-            if mm < self._close_mm and self._armed[side]:
+            if mm <= self._close_mm and self._armed[side]:
                 self._armed[side] = False
+                clap_edges.append(side)
                 last = self._last_clap_t[side]
                 if last is not None and now_s - last <= self._window_s:
                     self._last_clap_t[side] = None
                     triggered.append(side)
                 else:
                     self._last_clap_t[side] = now_s
+        self._last_clap_edges = tuple(clap_edges)
         return tuple(triggered)
 
 
